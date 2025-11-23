@@ -19,7 +19,7 @@ All hooks are managed through the repository’s `.pre-commit-config.yaml`. From
 ```bash
 pip install pre-commit # if not already installed
 chmod +x .config/ai-hooks/ai_guard.py
-pre-commit install --hook-type pre-commit --hook-type commit-msg
+pre-commit install
 ```
 
 This registers two hooks that both call `ai_guard.py`:
