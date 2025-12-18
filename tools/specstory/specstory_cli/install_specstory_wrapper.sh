@@ -15,6 +15,7 @@ VENV_HOOKS_ADDED=()
 # Constants
 WRAPPER_DIR="$HOME/.specstory_wrapper"
 WRAPPER_BIN="$HOME/bin/specstory"
+CLAUDE_WRAPPER_BIN="$HOME/bin/claude"
 PYTHON_WRAPPER="$WRAPPER_DIR/specstory_wrapper.py"
 PATH_EXPORT='export PATH="$HOME/bin:$PATH"'
 
@@ -73,8 +74,9 @@ cleanup_on_interrupt() {
   
   # Remove wrapper if it was created
   if [[ "$WRAPPER_CREATED" == "true" ]]; then
-    echo "  Removing wrapper binary..."
+    echo "  Removing wrapper binaries..."
     safe_remove "$WRAPPER_BIN"
+    safe_remove "$CLAUDE_WRAPPER_BIN"
   fi
   
   # Remove Python script if it was copied
@@ -143,16 +145,23 @@ else
   SPECSTORY_REAL_PATH="$REAL_WRAPPED"
 fi
 
-# --- Step 3: Install wrapper launcher ---
+# --- Step 3: Install wrapper launchers ---
 mkdir -p "$HOME/bin"
-echo "➡ Installing wrapper launcher → $WRAPPER_BIN"
+echo "➡ Installing specstory wrapper launcher → $WRAPPER_BIN"
 cat > "$WRAPPER_BIN" <<EOF
 #!/usr/bin/env bash
 # Provide the resolver script the path to the original specstory binary.
 export SPECSTORY_ORIGINAL="$SPECSTORY_REAL_PATH"
 exec python3 "$PYTHON_WRAPPER" "\$@"
 EOF
-chmod +x "$WRAPPER_BIN"
+
+echo "➡ Installing claude wrapper launcher → $CLAUDE_WRAPPER_BIN"
+cat > "$CLAUDE_WRAPPER_BIN" <<EOF
+#!/usr/bin/env bash
+exec "$WRAPPER_BIN" run claude --no-cloud-sync "\$@"
+EOF
+
+chmod +x "$WRAPPER_BIN" "$CLAUDE_WRAPPER_BIN"
 WRAPPER_CREATED=true
 
 # --- Step 4: Install Python wrapper script ---
@@ -168,28 +177,21 @@ cp specstory_wrapper.py "$PYTHON_WRAPPER"
 PYTHON_SCRIPT_COPIED=true
 
 # --- Step 5: Add ~/bin to PATH in shell configs ---
-if ! echo "$PATH" | grep -q "$HOME/bin"; then
-  echo "➡ Adding ~/bin to PATH in your shell config (bash/zsh)"
+# We prepend it to ensure our wrappers take priority over system binaries.
+if [[ ":$PATH:" != *":$HOME/bin:"* ]] || [[ "$PATH" != "$HOME/bin:"* ]]; then
+  echo "➡ Ensuring ~/bin is at the start of PATH in shell configs"
   
-  # Get unique profile files (handle case where .zshrc and .bashrc are the same)
-  declare -A seen_profiles
   for profile in "$HOME/.zshrc" "$HOME/.bashrc"; do
-    [[ -z "$profile" ]] && continue
-    [[ -n "${seen_profiles[$profile]}" ]] && continue
-    seen_profiles["$profile"]=1
-    
-    # Create profile file if it doesn't exist
     [[ ! -f "$profile" ]] && touch "$profile"
     
-    # Add PATH export if not already present
-    if ! grep -q "^${PATH_EXPORT}$" "$profile" 2>/dev/null; then
-      echo "➡ Updating $profile"
-      echo "$PATH_EXPORT" >> "$profile"
-      PROFILE_MODIFIED+=("$profile")
-    else
-      echo "✔ ~/bin already configured in $profile"
-    fi
+    # Remove existing ~/bin exports to avoid duplicates and ensure priority
+    sed -i '/export PATH="\$HOME\/bin:\$PATH"/d' "$profile"
+    
+    # Prepend it
+    echo "$PATH_EXPORT" >> "$profile"
+    PROFILE_MODIFIED+=("$profile")
   done
+  echo "✔ ~/bin configured at the end of shell profiles (will be prepended on next shell start)"
 fi
 
 # ============================================================================
@@ -401,5 +403,17 @@ trap - INT
 echo
 echo "Installation complete!"
 echo "Your Specstory wrapper is ready."
-echo "Restart your terminal or 'source ~/.zshrc' / 'source ~/.bashrc' if needed."
+
+# Final verification
+echo "➡ Verifying installation..."
+CURRENT_CLAUDE="$(command -v claude || true)"
+if [[ "$CURRENT_CLAUDE" != "$HOME/bin/claude" ]]; then
+  echo "⚠ Warning: 'claude' command points to $CURRENT_CLAUDE"
+  echo "   It should point to $HOME/bin/claude for SpecStory to work."
+  echo "   Please restart your terminal or run: export PATH=\"\$HOME/bin:\$PATH\""
+else
+  echo "✔ 'claude' command correctly points to your wrapper."
+fi
+
+echo "Restart your terminal or 'source ~/.zshrc' / 'source ~/.bashrc' to apply changes."
 echo

@@ -44,24 +44,28 @@ def find_real_specstory():
         if os.path.isabs(env_path) and os.path.exists(env_path) and not is_wrapper_script(env_path):
             return os.path.abspath(env_path)
 
-    # Try homebrew installation
-    prefix = subprocess.run(["brew", "--prefix"], capture_output=True, text=True).stdout.strip()
-    if prefix:
-        real_path = os.path.join(prefix, "bin", "specstory-real")
+    # Try homebrew installation if brew is available
+    if shutil.which("brew"):
+        try:
+            prefix = subprocess.run(["brew", "--prefix"], capture_output=True, text=True).stdout.strip()
+            if prefix:
+                real_path = os.path.join(prefix, "bin", "specstory-real")
 
-        # Check if specstory-real exists and is valid
-        if os.path.exists(real_path) and not os.path.islink(real_path) and not is_wrapper_script(real_path):
-            return real_path
+                # Check if specstory-real exists and is valid
+                if os.path.exists(real_path) and not os.path.islink(real_path) and not is_wrapper_script(real_path):
+                    return real_path
 
-        # Get current specstory version and create/fix symlink
-        specstory_path = subprocess.run(["brew", "--prefix", "specstory"], capture_output=True, text=True).stdout.strip()
-        if specstory_path:
-            real_bin = os.path.join(specstory_path, "bin", "specstory")
-            if os.path.exists(real_bin):
-                if os.path.exists(real_path) or os.path.islink(real_path):
-                    os.remove(real_path)
-                os.symlink(real_bin, real_path)
-                return real_path
+                # Get current specstory version and create/fix symlink
+                specstory_path = subprocess.run(["brew", "--prefix", "specstory"], capture_output=True, text=True).stdout.strip()
+                if specstory_path:
+                    real_bin = os.path.join(specstory_path, "bin", "specstory")
+                    if os.path.exists(real_bin):
+                        if os.path.exists(real_path) or os.path.islink(real_path):
+                            os.remove(real_path)
+                        os.symlink(real_bin, real_path)
+                        return real_path
+        except Exception:
+            pass
 
     # Fallback: search PATH (excluding wrapper directories)
     old_path = os.environ["PATH"]
@@ -71,6 +75,12 @@ def find_real_specstory():
 
     if resolved and not is_wrapper_script(resolved):
         return resolved
+
+    # Last resort: check common system locations
+    for location in ["/usr/local/bin/specstory-real", "/usr/bin/specstory-real", "/bin/specstory-real",
+                     "/usr/local/bin/specstory", "/usr/bin/specstory", "/bin/specstory"]:
+        if os.path.exists(location) and not is_wrapper_script(location):
+            return location
 
     return "specstory-real"
 
@@ -82,13 +92,22 @@ if is_wrapper_script(REAL):
     print(f"SPECSTORY_ORIGINAL={os.environ.get('SPECSTORY_ORIGINAL', 'not set')}", file=sys.stderr)
 
     # Try common locations as last resort
-    prefix = subprocess.run(["brew", "--prefix"], capture_output=True, text=True).stdout.strip()
-    candidates = [
-        os.path.join(prefix, "bin", "specstory-real") if prefix else None,
-        os.path.join(prefix, "bin", "specstory") if prefix else None,
+    candidates = []
+    if shutil.which("brew"):
+        try:
+            prefix = subprocess.run(["brew", "--prefix"], capture_output=True, text=True).stdout.strip()
+            if prefix:
+                candidates.append(os.path.join(prefix, "bin", "specstory-real"))
+                candidates.append(os.path.join(prefix, "bin", "specstory"))
+        except Exception:
+            pass
+    
+    candidates.extend([
         "/opt/homebrew/bin/specstory-real",
         "/usr/local/bin/specstory-real",
-    ]
+        "/usr/bin/specstory",
+        "/bin/specstory"
+    ])
 
     for candidate in candidates:
         if candidate and os.path.exists(candidate) and not is_wrapper_script(candidate):
@@ -401,6 +420,9 @@ def print_specstory_banner():
 
 def main():
     """Entry point: start watcher, run real tool, then merge timestamps."""
+    # Debug: print to stderr to verify execution
+    # print(f"DEBUG: specstory_wrapper.py called with {sys.argv}", file=sys.stderr)
+    
     os.makedirs(TS_DIR, exist_ok=True)
 
     if len(sys.argv) > 1 and sys.argv[1] == 'run':
