@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
+# Confirmation prompt
+echo "This will uninstall the SpecStory wrapper and restore the original specstory binary."
+printf "Continue? [y/N]: "
+read -r CONFIRM
+if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+  echo "Aborted."
+  exit 0
+fi
+
+echo
 echo "Uninstalling SpecStory wrapper..."
 
 # Constants (matching install script)
@@ -14,11 +24,22 @@ remove_from_profile() {
     local profile="$1"
     local pattern="$2"
     if [[ -f "$profile" ]]; then
-        if grep -q "$pattern" "$profile"; then
-            echo "➡ Cleaning up $profile..."
+        # Use grep -F for fixed strings when pattern doesn't start with ^
+        local grep_opts="-v"
+        if [[ "$pattern" != ^* ]]; then
+            grep_opts="-vF"
+        fi
+        if grep -q ${grep_opts#-v} "$pattern" "$profile" 2>/dev/null; then
+            echo "➡ Cleaning up $profile (removing: $pattern)..."
             # Use temp file for compatibility across Linux/macOS
-            grep -v "$pattern" "$profile" > "${profile}.tmp" || true
-            mv "${profile}.tmp" "$profile"
+            if grep $grep_opts "$pattern" "$profile" > "${profile}.tmp" 2>/dev/null; then
+                mv "${profile}.tmp" "$profile"
+            else
+                # grep returns 1 if no lines match (all lines matched pattern)
+                # In this case, leave an empty file
+                : > "$profile"
+            fi
+            rm -f "${profile}.tmp" 2>/dev/null || true
         fi
     fi
 }
@@ -32,15 +53,20 @@ is_wrapper() {
     return 1
 }
 
-# 1. Remove wrapper binaries
-for bin in "$WRAPPER_BIN" "$CLAUDE_WRAPPER_BIN" "$HOME/bin/specstory-real"; do
+# 1. Remove wrapper binaries (only wrappers we created, not specstory-real)
+for bin in "$WRAPPER_BIN" "$CLAUDE_WRAPPER_BIN"; do
+    if [[ ! -f "$bin" ]]; then
+        continue
+    fi
     if is_wrapper "$bin"; then
         echo "➡ Removing wrapper: $bin"
-        rm "$bin"
-    elif [[ -f "$bin" ]] && [[ "$bin" == "$CLAUDE_WRAPPER_BIN" ]]; then
-        # Always remove the claude wrapper we created
-        echo "➡ Removing $bin"
-        rm "$bin"
+        rm -f "$bin"
+    elif [[ "$bin" == "$CLAUDE_WRAPPER_BIN" ]]; then
+        # Always remove the claude wrapper we created (it calls specstory run claude)
+        if grep -q "specstory run claude" "$bin" 2>/dev/null; then
+            echo "➡ Removing $bin"
+            rm -f "$bin"
+        fi
     fi
 done
 
@@ -52,9 +78,11 @@ fi
 
 # 3. Clean up shell profiles
 for profile in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile"; do
-    # Remove PATH export
-    remove_from_profile "$profile" "^export PATH=\"\$HOME/bin:\$PATH\""
-    remove_from_profile "$profile" "^PATH=\"\$HOME/bin:\$PATH\""
+    [[ ! -f "$profile" ]] && continue
+
+    # Remove PATH export (use fixed strings to avoid escaping issues)
+    remove_from_profile "$profile" 'export PATH="\$HOME/bin:\$PATH"'
+    remove_from_profile "$profile" 'PATH="\$HOME/bin:\$PATH"'
     
     # Remove aliases
     remove_from_profile "$profile" "^alias claude="
@@ -63,16 +91,30 @@ for profile in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile"; do
     if [[ -f "$profile" ]] && grep -q "claude() {" "$profile"; then
         echo "➡ Removing claude() function from $profile"
         # Remove function block (heuristic)
-        sed -i.bak '/claude() {/,/}/d' "$profile" 2>/dev/null || true
-        rm -f "${profile}.bak"
+        # macOS sed requires backup extension, Linux doesn't - use empty string for macOS
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            sed -i '' '/claude() {/,/}/d' "$profile" 2>/dev/null || true
+        else
+            sed -i '/claude() {/,/}/d' "$profile" 2>/dev/null || true
+        fi
     fi
 
     # Remove SPECSTORY HOOK sections (from venv patching)
     if [[ -f "$profile" ]]; then
-        sed -i.bak '/# SPECSTORY HOOK START/,/# SPECSTORY HOOK END/d' "$profile" 2>/dev/null || true
-        sed -i.bak '/# SPECSTORY DEACTIVATE HOOK/,/unalias claude/d' "$profile" 2>/dev/null || true
-        sed -i.bak '/# SPECSTORY DEACTIVATE HOOK/,/unset -f claude/d' "$profile" 2>/dev/null || true
-        rm -f "${profile}.bak"
+        # macOS sed requires backup extension, Linux doesn't - use empty string for macOS
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            sed -i '' \
+                -e '/# SPECSTORY HOOK START/,/# SPECSTORY HOOK END/d' \
+                -e '/# SPECSTORY DEACTIVATE HOOK/,/unalias claude/d' \
+                -e '/# SPECSTORY DEACTIVATE HOOK/,/unset -f claude/d' \
+                "$profile" 2>/dev/null || true
+        else
+            sed -i \
+                -e '/# SPECSTORY HOOK START/,/# SPECSTORY HOOK END/d' \
+                -e '/# SPECSTORY DEACTIVATE HOOK/,/unalias claude/d' \
+                -e '/# SPECSTORY DEACTIVATE HOOK/,/unset -f claude/d' \
+                "$profile" 2>/dev/null || true
+        fi
     fi
 done
 

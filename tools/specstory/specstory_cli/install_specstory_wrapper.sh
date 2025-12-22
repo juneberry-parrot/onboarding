@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
 # ============================================================================
 # Configuration and State Tracking
@@ -33,8 +33,10 @@ safe_remove() {
 restore_profile() {
   local profile="$1"
   if [[ -f "$profile" ]] && [[ -s "$profile" ]]; then
-    grep -v "^${PATH_EXPORT}$" "$profile" > "${profile}.tmp" 2>/dev/null && \
+    # Use temp file to safely remove line; preserve file if grep finds nothing
+    if grep -v "^${PATH_EXPORT}$" "$profile" > "${profile}.tmp" 2>/dev/null; then
       mv "${profile}.tmp" "$profile" 2>/dev/null || true
+    fi
     rm -f "${profile}.tmp" 2>/dev/null || true
   fi
 }
@@ -47,15 +49,26 @@ remove_venv_hooks() {
   fi
 
   # Remove hook sections
-  sed -i.bak \
-    -e '/# SPECSTORY HOOK START/,/# SPECSTORY HOOK END/d' \
-    -e '/# SPECSTORY DEACTIVATE HOOK/,/unset -f claude/d' \
-    -e '/# SPECSTORY DEACTIVATE HOOK/,/unalias claude/d' \
-    -e '/^[[:space:]]*# SPECSTORY DEACTIVATE HOOK$/d' \
-    -e '/^[[:space:]]*unset -f claude 2>\/dev\/null || true$/d' \
-    -e '/^[[:space:]]*unalias claude 2>\/dev\/null || true$/d' \
-    "$hook_file" 2>/dev/null || true
-  rm -f "${hook_file}.bak" 2>/dev/null || true
+  # macOS sed requires backup extension, Linux doesn't - use empty string for macOS
+  if [[ "$OSTYPE" == "darwin"* ]]; then
+    sed -i '' \
+      -e '/# SPECSTORY HOOK START/,/# SPECSTORY HOOK END/d' \
+      -e '/# SPECSTORY DEACTIVATE HOOK/,/unset -f claude/d' \
+      -e '/# SPECSTORY DEACTIVATE HOOK/,/unalias claude/d' \
+      -e '/^[[:space:]]*# SPECSTORY DEACTIVATE HOOK$/d' \
+      -e '/^[[:space:]]*unset -f claude 2>\/dev\/null || true$/d' \
+      -e '/^[[:space:]]*unalias claude 2>\/dev\/null || true$/d' \
+      "$hook_file" 2>/dev/null || true
+  else
+    sed -i \
+      -e '/# SPECSTORY HOOK START/,/# SPECSTORY HOOK END/d' \
+      -e '/# SPECSTORY DEACTIVATE HOOK/,/unset -f claude/d' \
+      -e '/# SPECSTORY DEACTIVATE HOOK/,/unalias claude/d' \
+      -e '/^[[:space:]]*# SPECSTORY DEACTIVATE HOOK$/d' \
+      -e '/^[[:space:]]*unset -f claude 2>\/dev\/null || true$/d' \
+      -e '/^[[:space:]]*unalias claude 2>\/dev\/null || true$/d' \
+      "$hook_file" 2>/dev/null || true
+  fi
 }
 
 # ============================================================================
@@ -115,6 +128,21 @@ trap cleanup_on_interrupt INT
 
 echo "Installing Specstory wrapper..."
 
+# --- Step 0: Pre-flight checks ---
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WRAPPER_PY_SOURCE="${SCRIPT_DIR}/specstory_wrapper.py"
+
+if [[ ! -f "$WRAPPER_PY_SOURCE" ]]; then
+  echo "Error: specstory_wrapper.py not found at $WRAPPER_PY_SOURCE"
+  echo "Please run this installer from the directory containing specstory_wrapper.py"
+  exit 1
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "Error: python3 is required but not found in PATH."
+  exit 1
+fi
+
 # --- Step 1: Locate real specstory binary ---
 REAL_BIN="$(command -v specstory || true)"
 if [[ -z "$REAL_BIN" ]]; then
@@ -165,15 +193,9 @@ chmod +x "$WRAPPER_BIN" "$CLAUDE_WRAPPER_BIN"
 WRAPPER_CREATED=true
 
 # --- Step 4: Install Python wrapper script ---
-if [[ ! -f "specstory_wrapper.py" ]]; then
-  echo "Error: specstory_wrapper.py not found in the current directory."
-  echo "Please place it next to this installer."
-  exit 1
-fi
-
 echo "➡ Copying specstory_wrapper.py → $WRAPPER_DIR/"
 mkdir -p "$WRAPPER_DIR"
-cp specstory_wrapper.py "$PYTHON_WRAPPER"
+cp "$WRAPPER_PY_SOURCE" "$PYTHON_WRAPPER"
 PYTHON_SCRIPT_COPIED=true
 
 # --- Step 5: Add ~/bin to PATH in shell configs ---
@@ -185,7 +207,12 @@ if [[ ":$PATH:" != *":$HOME/bin:"* ]] || [[ "$PATH" != "$HOME/bin:"* ]]; then
     [[ ! -f "$profile" ]] && touch "$profile"
     
     # Remove existing ~/bin exports to avoid duplicates and ensure priority
-    sed -i '/export PATH="\$HOME\/bin:\$PATH"/d' "$profile"
+    # macOS sed requires backup extension, Linux doesn't - use empty string for macOS
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+      sed -i '' '/export PATH="\$HOME\/bin:\$PATH"/d' "$profile"
+    else
+      sed -i '/export PATH="\$HOME\/bin:\$PATH"/d' "$profile"
+    fi
     
     # Prepend it
     echo "$PATH_EXPORT" >> "$profile"
@@ -232,8 +259,8 @@ setup_conda_hooks() {
     exit 1
   fi
 
-  # Get environment path
-  env_path="$(conda env list | grep -E "^${env_name}[[:space:]]" | awk '{print $NF}')"
+  # Get environment path (anchor regex to prevent partial matches)
+  env_path="$(conda env list | grep -E "^${env_name}[[:space:]]+" | awk '{print $NF}')"
   
   if [[ -z "$env_path" ]]; then
     echo "Error: Conda environment '$env_name' not found."
@@ -316,12 +343,20 @@ setup_venv_hooks() {
     # Patch deactivate function in activate script
     if ! grep -q "# SPECSTORY DEACTIVATE HOOK" "$activate_script" 2>/dev/null; then
       if grep -q "^deactivate ()" "$activate_script"; then
-        sed -i.bak '/^deactivate ()/,/^}/ {
-          /^}/i\
+        # macOS sed requires backup extension, Linux doesn't - use empty string for macOS
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+          sed -i '' '/^deactivate ()/,/^}/ {
+            /^}/i\
     # SPECSTORY DEACTIVATE HOOK\
     unset -f claude 2>/dev/null || true
-        }' "$activate_script"
-        rm -f "${activate_script}.bak"
+          }' "$activate_script"
+        else
+          sed -i '/^deactivate ()/,/^}/ {
+            /^}/i\
+    # SPECSTORY DEACTIVATE HOOK\
+    unset -f claude 2>/dev/null || true
+          }' "$activate_script"
+        fi
         if [[ " ${VENV_HOOKS_ADDED[@]} " != *" $activate_script "* ]]; then
           VENV_HOOKS_ADDED+=("$activate_script")
         fi
@@ -406,6 +441,19 @@ echo "Your Specstory wrapper is ready."
 
 # Final verification
 echo "➡ Verifying installation..."
+
+# Check wrapper files exist and are executable
+if [[ ! -x "$WRAPPER_BIN" ]]; then
+  echo "⚠ Warning: $WRAPPER_BIN is not executable"
+fi
+if [[ ! -x "$CLAUDE_WRAPPER_BIN" ]]; then
+  echo "⚠ Warning: $CLAUDE_WRAPPER_BIN is not executable"
+fi
+if [[ ! -f "$PYTHON_WRAPPER" ]]; then
+  echo "⚠ Warning: $PYTHON_WRAPPER was not installed"
+fi
+
+# Check PATH
 CURRENT_CLAUDE="$(command -v claude || true)"
 if [[ "$CURRENT_CLAUDE" != "$HOME/bin/claude" ]]; then
   echo "⚠ Warning: 'claude' command points to $CURRENT_CLAUDE"
@@ -415,5 +463,14 @@ else
   echo "✔ 'claude' command correctly points to your wrapper."
 fi
 
+CURRENT_SPECSTORY="$(command -v specstory || true)"
+if [[ "$CURRENT_SPECSTORY" != "$HOME/bin/specstory" ]]; then
+  echo "⚠ Warning: 'specstory' command points to $CURRENT_SPECSTORY"
+  echo "   After restarting your terminal, it should point to $HOME/bin/specstory"
+else
+  echo "✔ 'specstory' command correctly points to your wrapper."
+fi
+
+echo
 echo "Restart your terminal or 'source ~/.zshrc' / 'source ~/.bashrc' to apply changes."
 echo

@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+"""
+SpecStory Wrapper - Records timestamps for Claude Code sessions.
+
+This wrapper intercepts specstory commands and logs timestamps for each
+User/Agent message exchange, then merges them into the markdown history files.
+"""
 
 import os
 import sys
@@ -9,10 +15,10 @@ from pathlib import Path
 import shutil
 import signal
 import json
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 # Dynamically find specstory-real, handling homebrew upgrades
-def is_wrapper_script(path):
+def is_wrapper_script(path: Optional[str]) -> bool:
     """Check if a given path is the wrapper script (bash or Python)."""
     if not path or not os.path.exists(path):
         return False
@@ -24,16 +30,37 @@ def is_wrapper_script(path):
     if path_abs == wrapper_bash or path_abs == wrapper_py:
         return True
     
-    # Check file content
-    with open(path, 'r') as f:
-        content = f.read(500)
-        if 'specstory_wrapper.py' in content:
-            return True
+    # Check file content (open in binary mode to handle binary files safely)
+    try:
+        with open(path, 'rb') as f:
+            content_bytes = f.read(500)
+            # Try to decode as UTF-8, fallback to byte search for binary files
+            try:
+                content = content_bytes.decode('utf-8')
+                if 'specstory_wrapper.py' in content:
+                    return True
+            except UnicodeDecodeError:
+                pass  # Binary file, will check bytes below
+            # Check for the string in bytes (handles binary files)
+            if b'specstory_wrapper.py' in content_bytes:
+                return True
+    except (OSError, IOError, PermissionError):
+        # If file can't be read, assume it's not the wrapper
+        pass
     
     return False
 
-def find_real_specstory():
-    """Find the real specstory binary, handling homebrew version changes."""
+def find_real_specstory() -> Optional[str]:
+    """Find the real specstory binary, handling homebrew version changes.
+
+    Search order:
+    1. SPECSTORY_ORIGINAL/SPECSTORY_REAL/ORIGINAL_SPECSTORY environment variable
+    2. brew --prefix based location (specstory-real or specstory)
+    3. System PATH (excluding our wrapper directory)
+
+    Returns:
+        Absolute path to the real specstory binary, or None if not found.
+    """
     # Get the wrapper's own path to exclude it from PATH searches
     wrapper_path = os.path.expanduser("~/bin/specstory")
     wrapper_dir = os.path.dirname(os.path.abspath(wrapper_path))
@@ -105,13 +132,31 @@ def find_real_specstory():
         os.symlink(real_bin, real_path)
 
         return real_path
-    except Exception:
-        # Fallback: try to find specstory in PATH (may be the system binary)
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        pass
+
+    # Fallback: try to find specstory in PATH, excluding our wrapper directory
+    path_env = os.environ.get("PATH", "")
+    path_parts = path_env.split(os.pathsep)
+    filtered_path = os.pathsep.join([
+        p for p in path_parts
+        if p != wrapper_dir and p != os.path.expanduser("~/bin")
+    ])
+
+    old_path = os.environ.get("PATH")
+    try:
+        os.environ["PATH"] = filtered_path
         resolved = shutil.which("specstory")
-        if resolved:
-            return resolved
-        # Final fallback name used by older installers
-        return "specstory-real"
+        if resolved and not is_wrapper_script(resolved):
+            return os.path.abspath(resolved)
+    finally:
+        if old_path is not None:
+            os.environ["PATH"] = old_path
+        else:
+            os.environ.pop("PATH", None)
+
+    # Not found
+    return None
 
 REAL = find_real_specstory()
 HIST_DIR = ".specstory/history"
@@ -120,8 +165,8 @@ TS_DIR = ".specstory/timestamps"
 POLL_INTERVAL = 0.1
 
 def read_lines_text(path: str) -> List[str]:
-    """Read a text file into normalized lines (LF) with UTF-8 decoding and ignore errors."""
-    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+    """Read a text file into normalized lines (LF) with UTF-8 decoding."""
+    with open(path, 'r', encoding='utf-8') as f:
         text = f.read()
     text = text.replace('\r\n', '\n').replace('\r', '\n')
     return text.split('\n')
@@ -154,18 +199,18 @@ def get_timestamp_file_for_md(md_path: str) -> str:
     base = Path(md_abs).stem
     return os.path.join(ts_dir_for_file, f"{base}.timestamps")
 
-def get_most_recent_md_file():
-    """Get the most recently created .md file in the current project's history directory."""
+def get_most_recent_md_file() -> Optional[str]:
+    """Get the most recently modified .md file in the current project's history directory."""
     md_files = glob.glob(f"{HIST_DIR}/*.md")
     if not md_files:
         return None
     latest_rel = max(md_files, key=os.path.getmtime)
     return os.path.abspath(latest_rel)
 
-def start_watcher(before_file, before_mtime):
+def start_watcher(before_file: Optional[str], before_mtime: Optional[float]) -> None:
     """Start the background watcher that logs timestamp|first-line for new User/Agent entries."""
     # Pre-create pidfile so the parent can reliably wait for it to populate
-    Path(f"/tmp/specstory_watcher_{os.getpid()}" ).touch()
+    Path(f"/tmp/specstory_watcher_{os.getpid()}").touch()
 
     pid = os.fork()
     if pid != 0:
@@ -232,7 +277,7 @@ def start_watcher(before_file, before_mtime):
             # Read existing entries
             existing = []
             if os.path.exists(ts_path):
-                with open(ts_path, 'r') as f:
+                with open(ts_path, 'r', encoding='utf-8') as f:
                     existing = [ln.strip() for ln in f if ln.strip()]
 
             # Compute snippets for headers-with-content
@@ -254,9 +299,11 @@ def start_watcher(before_file, before_mtime):
         time.sleep(POLL_INTERVAL)
 
 
-def merge_timestamps(target_md=None):
+def merge_timestamps(target_md: Optional[str] = None) -> None:
     """Insert timestamps into the markdown headers from the corresponding timestamps file.
-    If target_md is provided, that file is used; otherwise the latest md in history is used.
+
+    Args:
+        target_md: Path to the markdown file to process. If None, uses the most recent file.
     """
     if target_md:
         latest_md = os.path.abspath(target_md)
@@ -276,7 +323,7 @@ def merge_timestamps(target_md=None):
     # Consider interactive only if there is at least one User block with content
     has_user_content = False
     in_user_block = False
-    with open(latest_md, 'r') as md_in:
+    with open(latest_md, 'r', encoding='utf-8') as md_in:
         for raw_line in md_in:
             line = raw_line.rstrip('\n')
             if line.startswith('_**') and line.endswith('**_'):
@@ -305,19 +352,19 @@ def merge_timestamps(target_md=None):
         if snippet and snippet != header_txt and snippet != '---':
             headers_with_content.append((h, snippet))
 
-    with open(timestamp_file, 'r') as f:
+    with open(timestamp_file, 'r', encoding='utf-8') as f:
         existing = [ln.strip() for ln in f if ln.strip()]
 
     if len(existing) < len(headers_with_content):
         # Append missing timestamps with the corresponding snippets
         now_ts = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-        with open(timestamp_file, 'a') as f:
+        with open(timestamp_file, 'a', encoding='utf-8') as f:
             for i in range(len(existing), len(headers_with_content)):
                 _, snippet = headers_with_content[i]
                 f.write(f"{now_ts}|{snippet}\n")
 
     # Read timestamps
-    with open(timestamp_file, 'r') as f:
+    with open(timestamp_file, 'r', encoding='utf-8') as f:
         raw = [line.strip() for line in f if line.strip()]
     timestamps = []
     last = None
@@ -330,7 +377,8 @@ def merge_timestamps(target_md=None):
     temp_file = f"{latest_md}.tmp"
     timestamp_index = 0
 
-    with open(latest_md, 'r') as md_in, open(temp_file, 'w') as md_out:
+    with open(latest_md, 'r', encoding='utf-8') as md_in, \
+         open(temp_file, 'w', encoding='utf-8') as md_out:
         for line in md_in:
             line = line.rstrip('\n')
             # Check if this line is a User or Agent header
@@ -352,23 +400,35 @@ def merge_timestamps(target_md=None):
     # Replace original with updated file
     shutil.move(temp_file, latest_md)
 
-def merge_all_timestamps():
+def merge_all_timestamps() -> None:
     """Merge timestamps into all markdown files in the history directory."""
     md_files = glob.glob(f"{HIST_DIR}/*.md")
     for md_path in md_files:
         merge_timestamps(md_path)
 
 
-def stop_watcher():
+def _try_kill_process(pid: int, sig: signal.Signals) -> None:
+    """Try to kill process by process group, fallback to direct kill."""
+    try:
+        os.killpg(pid, sig)
+    except (ProcessLookupError, PermissionError):
+        # Process group doesn't exist or no permission, try direct kill
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            # Process already gone
+            pass
+
+def stop_watcher() -> None:
     """Stop the background watcher started by this process and remove its pidfile."""
     pidfile = f"/tmp/specstory_watcher_{os.getpid()}"
+    
     # Wait briefly for the pidfile to be populated if watcher is still starting
-
     deadline = time.time() + 2.0
     pid_text = None
     while time.time() < deadline:
         if os.path.exists(pidfile):
-            with open(pidfile, 'r') as f:
+            with open(pidfile, 'r', encoding='utf-8') as f:
                 pid_text = f.read().strip()
             if pid_text:
                 break
@@ -380,34 +440,35 @@ def stop_watcher():
             os.remove(pidfile)
         return
 
-    # Try JSON metadata first
-    target = None
+    # Parse PID from JSON or plain text
     try:
         meta = json.loads(pid_text)
         pid = int(meta.get("pid"))
-        target = meta.get("target")
-    except Exception:
+    except (json.JSONDecodeError, ValueError, KeyError):
         pid = int(pid_text)
 
     # Attempt graceful stop
-    try:
-        os.killpg(pid, signal.SIGTERM)
-    except Exception:
-        os.kill(pid, signal.SIGTERM)
+    _try_kill_process(pid, signal.SIGTERM)
 
-    # If still alive, escalate
+    # Check if process still exists after brief wait
     time.sleep(0.2)
-    os.kill(pid, 0)
     try:
-        os.killpg(pid, signal.SIGKILL)
-    except Exception:
-        os.kill(pid, signal.SIGKILL)
+        os.kill(pid, 0)  # Check if process exists
+    except ProcessLookupError:
+        # Process doesn't exist, clean up and return
+        if os.path.exists(pidfile):
+            os.remove(pidfile)
+        return
+    
+    # Process still exists, force kill it
+    _try_kill_process(pid, signal.SIGKILL)
 
+    # Clean up pidfile
     if os.path.exists(pidfile):
         os.remove(pidfile)
 
 
-def print_specstory_banner():
+def print_specstory_banner() -> None:
     """Print a banner indicating specstory recording is active."""
     # ANSI color codes
     CYAN = "\033[96m"
@@ -440,6 +501,21 @@ def main():
     # Start watcher in background
     start_watcher(before_file, before_mtime)
 
+    # Validate REAL path before running
+    if not REAL:
+        print("Error: Could not locate the real SpecStory binary.", file=sys.stderr)
+        print("Please ensure specstory is installed (brew install specstoryai/tap/specstory)", file=sys.stderr)
+        stop_watcher()
+        sys.exit(1)
+    if not os.path.exists(REAL):
+        print(f"Error: SpecStory binary not found at: {REAL}", file=sys.stderr)
+        stop_watcher()
+        sys.exit(1)
+    if not os.access(REAL, os.X_OK):
+        print(f"Error: SpecStory binary is not executable: {REAL}", file=sys.stderr)
+        stop_watcher()
+        sys.exit(1)
+
     # Run SpecStory in foreground
     result = subprocess.run([REAL] + sys.argv[1:])
     status = result.returncode
@@ -451,11 +527,15 @@ def main():
     pidfile = f"/tmp/specstory_watcher_{os.getpid()}"
     target_md = None
     if os.path.exists(pidfile):
-        with open(pidfile, 'r') as f:
-            content = f.read().strip()
-        if content:
-            meta = json.loads(content)
-            target_md = meta.get("target")
+        try:
+            with open(pidfile, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+            if content:
+                meta = json.loads(content)
+                target_md = meta.get("target")
+        except (json.JSONDecodeError, OSError, KeyError):
+            # Pidfile may be corrupted or partially written
+            pass
 
     # Stop the watcher before modifying the markdown so it doesn't record the merge
     stop_watcher()
