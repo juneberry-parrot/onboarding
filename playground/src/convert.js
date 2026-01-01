@@ -11,7 +11,19 @@ const defaults = JSON.parse(
   readFileSync(join(__dirname, "../config/defaults.json"), "utf-8")
 );
 
-export function convert(type, value, from, to) {
+function roundToPrecision(value, precision) {
+  const multiplier = Math.pow(10, precision);
+  return Math.round(value * multiplier) / multiplier;
+}
+
+function withPrecision(fn, precision) {
+  return function (...args) {
+    const result = fn.apply(this, args);
+    return roundToPrecision(result, precision);
+  };
+}
+
+function convertImpl(type, value, from, to) {
   value = typeof value === "string" ? Number(value) : value;
   if (typeof value !== "number" || isNaN(value)) {
     throw new Error("Invalid numeric value");
@@ -32,3 +44,5 @@ export function convert(type, value, from, to) {
       throw new Error("Unknown type " + type);
   }
 }
+
+export const convert = withPrecision(convertImpl, defaults.precision);
