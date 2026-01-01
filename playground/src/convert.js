@@ -12,6 +12,11 @@ const defaults = JSON.parse(
 );
 
 export function convert(type, value, from, to) {
+  value = typeof value === "string" ? Number(value) : value;
+  if (typeof value !== "number" || isNaN(value)) {
+    throw new Error("Invalid numeric value");
+  }
+
   switch (type) {
     case "temperature":
       return temperature.convertTemperature(
